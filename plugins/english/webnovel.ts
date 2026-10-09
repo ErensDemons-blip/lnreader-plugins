@@ -7,13 +7,12 @@ import { storage } from '@libs/storage';
 class Webnovel implements Plugin.PluginBase {
   id = 'webnovel';
   name = 'Webnovel';
-  version = '1.1.0';
+  version = '1.1.1';
   icon = 'src/en/webnovel/icon.png';
   site = 'https://www.webnovel.com';
   headers = {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Referer': this.site,
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
   imageRequestInit?: Plugin.ImageRequestInit | undefined = {
     headers: {
@@ -70,6 +69,7 @@ class Webnovel implements Plugin.PluginBase {
         try {
           response = await fetchApi(url, {
             headers: this.headers,
+            credentials: 'include',
           });
         } catch (error) {
           if (attempt === maxAttempts - 1) throw error;
@@ -196,6 +196,7 @@ class Webnovel implements Plugin.PluginBase {
 
     const result = await fetchApi(url, {
       headers: this.headers,
+      credentials: 'include',
     });
     const body = await result.text();
     const loadedCheerio = parseHTML(body);
@@ -207,6 +208,7 @@ class Webnovel implements Plugin.PluginBase {
     const url = this.site + novelPath + '/catalog';
     const result = await fetchApi(url, {
       headers: this.headers,
+      credentials: 'include',
     });
     const body = await result.text();
 
@@ -247,6 +249,7 @@ class Webnovel implements Plugin.PluginBase {
     const url = this.site + novelPath;
     const result = await fetchApi(url, {
       headers: this.headers,
+      credentials: 'include',
     });
     const body = await result.text();
 
@@ -318,6 +321,7 @@ class Webnovel implements Plugin.PluginBase {
     const url = `${this.site}/search?keywords=${encodeURIComponent(searchTerm)}&pageIndex=${pageNo}${type ? `&type=${type}` : ''}`;
     const result = await fetchApi(url, {
       headers: this.headers,
+      credentials: 'include',
     });
     const body = await result.text();
 
