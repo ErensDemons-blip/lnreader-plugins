@@ -11,7 +11,10 @@ class NovelpiaGlobalPlugin implements Plugin.PluginBase {
   icon = 'src/en/novelpiaglobal/icon.png';
   site = 'https://global.novelpia.com';
   api = 'https://api-global.novelpia.com';
-  version = '1.0.0';
+  version = '1.1.0';
+
+  private accessToken = '';
+  private readonly anonymousKey = this.createAnonymousKey();
 
   imageRequestInit: Plugin.ImageRequestInit = {
     headers: {
@@ -29,19 +32,31 @@ class NovelpiaGlobalPlugin implements Plugin.PluginBase {
   private async fetchJson<T>(path: string, init?: FetchInit): Promise<T> {
     const response = await fetchApi(`${this.api}${path}`, {
       ...init,
+      credentials: 'include',
       headers: {
         ...this.baseHeaders,
         ...(init?.headers || {}),
       },
     });
 
-    if (!response.ok) {
-      throw new Error(`Novelpia request failed (${response.status})`);
+    let data: ApiResponse<T> | undefined;
+    try {
+      data = (await response.json()) as ApiResponse<T>;
+    } catch {
+      // The HTTP status below still gives callers a useful error.
     }
 
-    const data = (await response.json()) as ApiResponse<T>;
-    if (data.statusCode !== 200 || !data.result) {
-      throw new Error(data.errmsg || 'Novelpia returned an invalid response');
+    if (!response.ok) {
+      const error = new Error(
+        data?.errmsg || `Novelpia request failed (${response.status})`,
+      ) as NovelpiaRequestError;
+      error.name = 'NovelpiaRequestError';
+      error.status = response.status;
+      throw error;
+    }
+
+    if (!data || data.statusCode !== 200 || !data.result) {
+      throw new Error(data?.errmsg || 'Novelpia returned an invalid response');
     }
 
     return data.result;
@@ -167,16 +182,31 @@ class NovelpiaGlobalPlugin implements Plugin.PluginBase {
     if (!match) throw new Error('Invalid Novelpia chapter path');
 
     const episodeNo = match[1];
-    const anonymousKey = this.createAnonymousKey();
-    const headers = {
+    const headers: Record<string, string> = {
       ...this.baseHeaders,
       'Referer': `${this.site}/viewer/${episodeNo}`,
-      'Cookie': `USERKEY=${anonymousKey}; last_login=basic`,
+      'Cookie': `USERKEY=${this.anonymousKey}`,
     };
-    const ticket = await this.fetchJson<EpisodeTicketResult>(
-      `/v1/novel/episode?episode_no=${episodeNo}`,
-      { headers },
-    );
+    let ticket: EpisodeTicketResult;
+
+    try {
+      ticket = await this.fetchEpisodeTicket(episodeNo, headers);
+    } catch (error) {
+      if (!this.isUnauthorized(error)) {
+        throw error;
+      }
+
+      const accessToken = await this.refreshAccessToken();
+      if (!accessToken) {
+        throw new Error(
+          'Novelpia login required. Open this source in WebView, sign in, then try the download again.',
+        );
+      }
+
+      headers['Login-At'] = accessToken;
+      ticket = await this.fetchEpisodeTicket(episodeNo, headers);
+    }
+
     const token = ticket._t;
 
     if (!token) {
@@ -206,6 +236,41 @@ class NovelpiaGlobalPlugin implements Plugin.PluginBase {
     const $ = loadCheerio(`<body>${chapterHtml}</body>`);
     $('script, style, iframe, form').remove();
     return $('body').html() || '';
+  }
+
+  private fetchEpisodeTicket(
+    episodeNo: string,
+    headers: Record<string, string>,
+  ): Promise<EpisodeTicketResult> {
+    if (this.accessToken) headers['Login-At'] = this.accessToken;
+    return this.fetchJson<EpisodeTicketResult>(
+      `/v1/novel/episode?episode_no=${episodeNo}`,
+      { headers },
+    );
+  }
+
+  private async refreshAccessToken(): Promise<string> {
+    try {
+      const result =
+        await this.fetchJson<LoginRefreshResult>('/v1/login/refresh');
+      this.accessToken = result.LOGINAT || '';
+    } catch (error) {
+      if (!this.isUnauthorized(error)) {
+        throw error;
+      }
+      this.accessToken = '';
+    }
+
+    return this.accessToken;
+  }
+
+  private isUnauthorized(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'status' in error &&
+      (error as NovelpiaRequestError).status === 401
+    );
   }
 
   resolveUrl(path: string): string {
@@ -317,6 +382,12 @@ type EpisodeTicketResult = {
 type EpisodeContentResult = {
   data?: Record<string, string>;
 };
+
+type LoginRefreshResult = {
+  LOGINAT?: string;
+};
+
+type NovelpiaRequestError = Error & { status: number };
 
 type FilterValues = Plugin.PopularNovelsOptions<
   typeof NovelpiaGlobalPlugin.prototype.filters
