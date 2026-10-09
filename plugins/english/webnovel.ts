@@ -7,10 +7,11 @@ import { storage } from '@libs/storage';
 class Webnovel implements Plugin.PluginBase {
   id = 'webnovel';
   name = 'Webnovel';
-  version = '1.0.3';
+  version = '1.1.0';
   icon = 'src/en/webnovel/icon.png';
   site = 'https://www.webnovel.com';
   headers = {
+    'Referer': this.site,
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
@@ -27,6 +28,82 @@ class Webnovel implements Plugin.PluginBase {
       type: 'Switch',
     },
   };
+
+  private chapterRequestQueue: Promise<void> = Promise.resolve();
+  private chapterCooldownUntil = 0;
+  private readonly chapterRequestInterval = 2000;
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private retryDelay(response: Response | null, attempt: number): number {
+    const retryAfter = response?.headers.get('retry-after');
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+      const date = Date.parse(retryAfter);
+      if (!Number.isNaN(date)) return Math.max(date - Date.now(), 0);
+    }
+
+    return 8000 * 2 ** attempt;
+  }
+
+  private async fetchChapterWithRetry(url: string): Promise<Response> {
+    const previousRequest = this.chapterRequestQueue;
+    let releaseQueue = () => undefined;
+    this.chapterRequestQueue = new Promise<void>(resolve => {
+      releaseQueue = resolve;
+    });
+
+    await previousRequest;
+
+    try {
+      const initialWait = this.chapterCooldownUntil - Date.now();
+      if (initialWait > 0) await this.sleep(initialWait);
+
+      const maxAttempts = 3;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        let response: Response;
+
+        try {
+          response = await fetchApi(url, {
+            headers: this.headers,
+          });
+        } catch (error) {
+          if (attempt === maxAttempts - 1) throw error;
+
+          const delay = this.retryDelay(null, attempt);
+          this.chapterCooldownUntil = Date.now() + delay;
+          await this.sleep(delay);
+          continue;
+        }
+
+        this.chapterCooldownUntil = Date.now() + this.chapterRequestInterval;
+        if (response.ok) return response;
+
+        const retryable = [401, 429, 503].includes(response.status);
+        if (!retryable || attempt === maxAttempts - 1) {
+          throw Object.assign(
+            new Error(`Webnovel request failed (HTTP ${response.status})`),
+            { status: response.status, response },
+          );
+        }
+
+        const delay = Math.max(
+          this.chapterRequestInterval,
+          this.retryDelay(response, attempt),
+        );
+        this.chapterCooldownUntil = Date.now() + delay;
+        await this.sleep(delay);
+      }
+
+      throw new Error('Webnovel chapter request failed');
+    } finally {
+      releaseQueue();
+    }
+  }
 
   async parseNovels(
     loadedCheerio: CheerioAPI,
@@ -211,9 +288,7 @@ class Webnovel implements Plugin.PluginBase {
 
   async parseChapter(chapterPath: string): Promise<string> {
     const url = this.site + chapterPath;
-    const result = await fetchApi(url, {
-      headers: this.headers,
-    });
+    const result = await this.fetchChapterWithRetry(url);
     const body = await result.text();
 
     const loadedCheerio = parseHTML(body);
